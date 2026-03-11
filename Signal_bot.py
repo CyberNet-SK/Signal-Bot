@@ -1,39 +1,79 @@
-import time
-import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime
 from telegram import Bot
 import asyncio
 from flask import Flask
 from threading import Thread
+from datetime import datetime
 
 # ------------------ সেটিংস ------------------
 TELEGRAM_TOKEN = "8691655581:AAFiyQ_5ZhnCscNktX_AhyQBP4w2v5AkZak"
 CHAT_ID = "7819937011"
 SYMBOL = "EURUSD=X"
 TIMEFRAME = "1m"
-EMA_FAST = 9
-EMA_SLOW = 21
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
 
 bot = Bot(token=TELEGRAM_TOKEN)
-
-# --- বটের স্থায়িত্বের জন্য Flask সার্ভার ---
 app = Flask('')
 
 @app.route('/')
-def home():
-    return "Bot is alive!"
+def home(): return "Bot is Running!"
 
-def run_server():
-    app.run(host='0.0.0.0', port=8080)
+def run_server(): app.run(host='0.0.0.0', port=8080)
 
-def keep_alive():
-    t = Thread(target=run_server)
-    t.start()
+def calculate_ema(prices, days):
+    if len(prices) < days: return [0]*len(prices)
+    ema = [sum(prices[:days]) / days]
+    multiplier = 2 / (days + 1)
+    for i in range(days, len(prices)):
+        ema.append((prices[i] - ema[-1]) * multiplier + ema[-1])
+    return [0]*(days-1) + ema
+
+def calculate_rsi(prices, period=14):
+    if len(prices) < period: return 50
+    deltas = [prices[i+1]-prices[i] for i in range(len(prices)-1)]
+    gain = [d if d > 0 else 0 for d in deltas]
+    loss = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gain[:period]) / period
+    avg_loss = sum(loss[:period]) / period
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gain[i]) / period
+        avg_loss = (avg_loss * (period - 1) + loss[i]) / period
+    if avg_loss == 0: return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+async def main_loop():
+    last_time = None
+    while True:
+        try:
+            data = yf.download(tickers=SYMBOL, period="1d", interval=TIMEFRAME, progress=False)
+            if data.empty:
+                await asyncio.sleep(30); continue
+            
+            curr_time = data.index[-1]
+            if last_time == curr_time:
+                await asyncio.sleep(10); continue
+            last_time = curr_time
+
+            closes = data['Close'].tolist()
+            ema9 = calculate_ema(closes, 9)
+            ema21 = calculate_ema(closes, 21)
+            rsi = calculate_rsi(closes, 14)
+
+            # Signal Logic
+            if ema9[-2] < ema21[-2] and ema9[-1] > ema21[-1] and rsi < 45:
+                msg = f"🟢 **BUY (Call)**\nPrice: {round(closes[-1], 5)}\nRSI: {round(rsi, 2)}"
+                await bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+            elif ema9[-2] > ema21[-2] and ema9[-1] < ema21[-1] and rsi > 55:
+                msg = f"🔴 **SELL (Put)**\nPrice: {round(closes[-1], 5)}\nRSI: {round(rsi, 2)}"
+                await bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+
+            await asyncio.sleep(15)
+        except Exception as e:
+            print(f"Error: {e}"); await asyncio.sleep(30)
+
+if __name__ == "__main__":
+    Thread(target=run_server).start()
+    asyncio.run(main_loop())
 # -----------------------------------------
 
 async def send_message(text):
